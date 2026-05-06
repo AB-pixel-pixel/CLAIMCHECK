@@ -1,0 +1,11 @@
+-r ClaimCheck/requirement.txt
+
+tqdm>=4.66
+datasets>=2.19
+transformers>=4.51
+accelerate>=0.30
+peft>=0.11
+bitsandbytes>=0.43
+
+# Optional local model/runtime extras used by helper scripts.
+vllm>=0.8
