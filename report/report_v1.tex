@@ -1,0 +1,127 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+
+\title{Reproduction Report for ClaimCheck}
+\author{Ling Shaobin}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Abstract}
+This report documents an ongoing reproduction of \textit{ClaimCheck: Automatic Fact-Checking of Textual Claims using Web Evidence}. The target paper proposes a fact-checking pipeline for AVeriTeC that combines claim-matching with novel claim processing and uses small language models together with online search. Our reproduction focuses on whether the method can be made runnable and whether its reported effectiveness can be approached in a local environment. At the current stage, the pipeline has been adapted to run with a local HuggingFace model on \texttt{cuda:1}, a Bocha-based Web search backend, quota tracking, and tmux-based long-running execution. The main expected source of discrepancy is that the published system relies on Qwen2.5-7B and a fine-tuned Qwen2.5-7B verdict model, while the current local reproduction uses Qwen3.5-4B and does not have the original fine-tuned checkpoint. Therefore, the final reproduced accuracy is expected to differ from the number reported in the paper, and this gap must be interpreted together with the implementation differences described below.
+
+\section*{Introduction}
+Automated fact-checking aims to verify whether a textual claim is supported or refuted by available evidence. ClaimCheck is an attractive reproduction target because it makes two strong claims at the same time. First, it argues that live Web search can be used to support end-to-end fact-checking on AVeriTeC. Second, it argues that a carefully structured pipeline can compensate for the weaker reasoning ability of smaller language models. In the original paper, the system is evaluated on the 500-claim development split of AVeriTeC and reports a claim alignment accuracy of 0.626.
+
+This reproduction has a practical goal rather than a purely archival one. We are not only interested in whether the reported score can be matched, but also whether the method remains operational under local constraints such as finite search quota, different inference backends, and the absence of the paper's fine-tuned verdict model. For that reason, the report emphasizes both scientific faithfulness and engineering realism.
+
+\section*{Proposed Idea / Exploration}
+The core idea of ClaimCheck is to avoid asking a small LLM to solve the whole fact-checking problem in a single prompt. Instead, the verification process is decomposed into smaller stages that resemble a human fact-checking workflow. In the original paper, the system first attempts \textit{claim-matching}: it searches for an already published fact-check article from a trusted source and, if successful, uses that article as direct evidence. If this branch fails, the system falls back to \textit{novel claim processing}, which breaks the task into claim reformulation, question generation, query generation, evidence retrieval, question answering, evidence curation, and verdict prediction.
+
+Figure~\ref{fig:claimcheck-framework} shows the high-level framework used as the conceptual reference for our reproduction. Although our current runnable scaffold is simpler than the full architecture described in the paper, this figure still captures the intended logic of the system: planning search actions, retrieving and filtering evidence, synthesizing findings, and finally predicting a verdict.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{../arXiv-2510.01226v1/latex/figures/ClaimCheck.pdf}
+    \caption{High-level ClaimCheck pipeline used as the framework reference for this reproduction. The figure is included from the locally available arXiv source package \texttt{arXiv-2510.01226v1}.}
+    \label{fig:claimcheck-framework}
+\end{figure}
+
+Our reproduction follows this framework in spirit, but not yet in full fidelity. The currently runnable local code behaves more like a simplified modular loop: it plans Web search actions, executes Web retrieval, summarizes scraped evidence, optionally performs synthesis with additional retrieval, and then predicts a final verdict. During reproduction, this led to a practical reinterpretation of the paper's contribution. Instead of treating the paper as a single monolithic implementation, we treat it as an architectural hypothesis: structured decomposition should make small-model fact-checking more viable than naive direct prompting. The experiment is designed to test this hypothesis under the currently available implementation.
+
+\section*{Technical Details}
+The original paper evaluates ClaimCheck on the AVeriTeC development set with 500 claims. It reports that Qwen2.5-7B is used for most subtasks and a fine-tuned Qwen2.5-7B model is used for verdict prediction. The evidence source is live Web search with temporal filtering, and the reported metric is claim alignment accuracy. The published headline numbers are 0.626 for the full system and 0.598 for the version without claim-matching.
+
+The current reproduction differs from the paper in several important ways.
+
+\subsection*{Implementation Differences}
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Model substitution.} The paper uses Qwen2.5-7B and a fine-tuned verdict model. Our local reproduction currently uses \texttt{Qwen/Qwen3.5-4B} through HuggingFace. This is a substantial change because the verdict stage is one of the hardest parts of the pipeline and the paper explicitly benefits from fine-tuning.
+\item \textbf{Missing original fine-tuned checkpoint.} The fine-tuned Qwen2.5-7B verdict model used in the paper is not available in this workspace. As a result, the final classification stage in our run is necessarily weaker than the published setup.
+\item \textbf{Partial mismatch between architecture and scaffold.} The paper describes a richer architecture including claim-matching, claim reformulation, question generation, query generation, question answering, and evidence curation. The current runnable path is closer to a simplified plan-retrieve-summarize-synthesize-judge loop.
+\item \textbf{Different search backend.} The local reproduction now uses the Bocha Web Search API instead of the search backend assumed in the initial scaffold. We kept the application-level interface the same and added local date filtering to reduce temporal leakage.
+\item \textbf{Different inference runtime.} The paper describes an Ollama-centered setup, whereas our reproduction uses local HuggingFace Transformers inference.
+\end{enumerate}
+
+\subsection*{Engineering Modifications for Reproduction}
+Several engineering changes were required to make the system experimentally usable.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{GPU placement.} The model loader was modified to bind the local model explicitly to \texttt{cuda:1} rather than using automatic placement. This reduces resource contention and makes runtime behavior more predictable.
+\item \textbf{Bocha integration.} The search layer was rewritten to call Bocha's official \texttt{/v1/web-search} endpoint. The returned \texttt{data.webPages.value} items are mapped into the existing evidence pipeline, and publication time is filtered against the claim date.
+\item \textbf{Quota control.} Because Web search is metered, we added a global query counter and an adjustable stop threshold. In the final long run reported here, the search budget was relaxed to 10,000 queries, which was more than sufficient for a single 500-claim pass.
+\item \textbf{tmux execution and monitoring.} The long-running experiment is executed inside a dedicated tmux session with a progress bar, current accuracy estimate, search usage display, and ETA.
+\item \textbf{Fallback action extraction.} The planning module sometimes outputs verbose reasoning rather than clean \texttt{web\_search(...)} lines. To keep the pipeline moving, we added code-block parsing plus a fallback that directly searches with the claim text when no valid action is extracted.
+\end{enumerate}
+
+These modifications should be understood as reproduction-enabling changes, not as faithful copies of the original system. They make the local experiment possible, but they also create a nontrivial reproduction gap that must be acknowledged when interpreting the final results.
+
+\section*{Results}
+The long-running tmux experiment completed a full pass over all 500 claims in the AVeriTeC development split. The run produced 500 report directories and issued exactly 500 Web search requests through the Bocha backend, which means the current pipeline effectively used one search query per claim. This happened because the fallback search action was frequently triggered and the system typically stopped after one main retrieval step.
+
+However, the final fact-checking quality was substantially below the paper's reported result. Out of the 500 claims, only 248 runs produced a verdict that matched one of the four valid AVeriTeC classes: Supported, Refuted, Conflicting Evidence/Cherrypicking, or Not Enough Evidence. The remaining 252 runs produced malformed verdict outputs, typically long reasoning text instead of a normalized label. Among the 248 valid predictions, only 60 matched the gold label. This yields:
+
+\begin{itemize}[leftmargin=*]
+\item valid-verdict accuracy: \(60 / 248 \approx 0.242\);
+\item full-run accuracy over all 500 claims: \(60 / 500 = 0.120\).
+\end{itemize}
+
+These numbers are far below the original paper's 0.626 accuracy. They are also below the paper's naive Qwen2.5-7B baseline of 0.260. In practice, the most severe issue in this reproduction was not retrieval coverage but verdict formatting and verdict reliability. The query log shows that all 500 claims were searched, yet more than half of the final outputs failed to collapse into one of the required verdict classes.
+
+Qualitatively, the predictions that did produce valid labels were strongly biased toward \texttt{Supported}. In the completed run, 233 of the 248 valid outputs were \texttt{Supported}, while only 8 were \texttt{Refuted} and 7 were \texttt{Not Enough Evidence}. No meaningful number of \texttt{Conflicting Evidence/Cherrypicking} predictions was observed. This label imbalance is inconsistent with the gold-label distribution in the development set and indicates that the verdict module remained unstable despite the prompt-shortening and generation-limiting changes introduced during reproduction.
+
+\section*{Analysis and Discussion}
+The reproduction answers the three core questions of this project fairly clearly.
+
+First, \textbf{the method can be made runnable in our environment}. The end-to-end pipeline executes locally with a small HuggingFace model on \texttt{cuda:1}, uses live Web search, keeps temporal filtering at the application layer, tracks quota, and can process the full 500-claim development split in tmux without manual intervention. On an engineering level, the reproduction was successful.
+
+Second, \textbf{the reproduced system in its current form is not effective}. The gap between the reported 0.626 accuracy and the observed 0.120 full-run accuracy is too large to treat as normal variance. Even if we only count runs with valid verdict labels, the 0.242 accuracy remains far below the paper. Therefore, the paper's empirical claim is not reproduced by the current local implementation.
+
+Third, \textbf{the difference from the paper is substantial and technically well explained}. The biggest contributors appear to be the following.
+
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Missing fine-tuned verdict model.} The paper explicitly uses a fine-tuned Qwen2.5-7B model for verdict prediction. Our run does not have this checkpoint. The observed failure mode---returning long reasoning instead of a legal verdict label---is exactly the kind of issue that fine-tuning could plausibly reduce.
+\item \textbf{Model mismatch.} The current run uses Qwen3.5-4B rather than Qwen2.5-7B. This is not a small substitution. It changes both model scale and model family behavior, especially in instruction following and classification formatting.
+\item \textbf{Architecture mismatch.} The runnable scaffold is only a partial approximation of the paper's full system. In particular, the claim-matching branch described in the paper is not faithfully reproduced in the active path, and the novel-claim branch is simplified into a narrower planning and summarization loop.
+\item \textbf{Evidence summaries are themselves noisy.} In many generated reports, the ``summary'' fields are not true summaries of webpages but new chains of thought about how to summarize them. This contaminates the final verdict record and weakens the link between retrieved evidence and downstream judgment.
+\item \textbf{Verdict extraction remains brittle.} Even after prompt shortening and output-length reduction, more than half of the runs still failed to return a proper label. This indicates that the verdict stage is the main bottleneck of the current reproduction.
+\end{enumerate}
+
+The practical conclusion is that the original paper's high-level intuition remains plausible, but our current reproduction does not validate the published effectiveness claim. The pipeline structure is useful enough to make a complete system run locally, yet the specific local implementation is not strong enough to reproduce the reported accuracy. The strongest evidence from this reproduction is therefore negative but informative: the paper's result appears to depend heavily on components that are absent or only weakly approximated in the public scaffold, especially the verdict model and the fidelity of the intermediate evidence-processing stages.
+
+\section*{References}
+\begin{thebibliography}{9}
+
+\bibitem{claimcheck2025}
+Akshith Reddy Putta, Jacob Devasier, and Chengkai Li.
+\newblock ClaimCheck: Automatic Fact-Checking of Textual Claims using Web Evidence.
+\newblock In \textit{Proceedings of the 4th International Workshop on Knowledge-Augmented Methods for Natural Language Processing (KnowledgeNLP'25)}, 2025.
+
+\bibitem{averitec2023}
+Andreas Vlachos et al.
+\newblock AVeriTeC: A dataset for real-world claim verification with evidence from the web.
+\newblock 2023.
+
+\bibitem{fever2024}
+Andreas Vlachos et al.
+\newblock The Automated Verification of Textual Claims (AVeriTeC) Shared Task.
+\newblock In \textit{Proceedings of the Seventh Fact Extraction and VERification Workshop (FEVER)}, 2024.
+
+\bibitem{hero2024}
+Yejun Yoon, Jaeyoon Jung, Seunghyun Yoon, and Kunwoo Park.
+\newblock HerO at AVeriTeC: The herd of evidence-driven retrievers with large language models for claim verification.
+\newblock 2024.
+
+\bibitem{infact2024}
+Alexander Rothermel et al.
+\newblock InFact.
+\newblock 2024.
+
+\end{thebibliography}
+
+\end{document}

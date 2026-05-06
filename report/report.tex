@@ -1,0 +1,207 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\title{Can a Fine-Tuned 4B-Parameter LLM Perform Reliable Fact Verification Through Explicit Reasoning?}
+\author{Ling Shaobin}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Abstract}
+This report studies whether a fine-tuned 4B-parameter language model can perform reliable fact verification when embedded in an explicit reasoning and Web-evidence pipeline. The reproduction is based on \textit{ClaimCheck: Automatic Fact-Checking of Textual Claims using Web Evidence}, which proposes a modular fact-checking system for AVeriTeC. Instead of asking a model to directly classify a claim, ClaimCheck decomposes verification into planning, Web evidence retrieval, evidence summarization, synthesis, and final verdict prediction.
+
+Our local system replaces the paper's model stack with \texttt{Qwen/Qwen3.5-4B} plus a locally fine-tuned LoRA adapter trained on AVeriTeC-style verdict data. The system was made runnable with local HuggingFace inference, Bocha Web search, temporal filtering, quota tracking, and tmux-based long-running execution. On the 500-claim AVeriTeC-style development sample, the final run completed 498 claims successfully, failed on 2 claims, and achieved \(214/500 = 0.428\) full-run accuracy. This is far below the ClaimCheck paper's reported 0.626 accuracy. An earlier 10-claim debugging run with the same LoRA adapter achieved only \(1/10 = 0.100\), showing that pipeline stabilization and verdict parsing mattered substantially. However, this workspace does not currently contain a clean 500-claim non-fine-tuned baseline, so we do not claim a controlled fine-tuning ablation.
+
+\section*{Introduction}
+Automated fact verification asks whether a textual claim is supported, refuted, contradicted by mixed evidence, or not answerable from available evidence. This problem is difficult for small language models because it combines several tasks: understanding the claim, finding relevant evidence, respecting the claim date, interpreting noisy Web pages, and mapping the result into a small verdict label set.
+
+The ClaimCheck paper is a useful target for this question because it argues that explicit reasoning can make smaller language models more useful for fact-checking. The paper reports 0.626 verdict prediction accuracy on the AVeriTeC development set with a system that uses Web search and a fine-tuned verdict model. Our report asks a narrower local question: \textit{Can a fine-tuned 4B-parameter LLM perform reliable fact verification through explicit reasoning?}
+
+The answer from our reproduction is mixed. The system can be made runnable end-to-end with the fine-tuned local adapter. However, the final accuracy of 0.428 is still not reliable enough for a strong reproduction of the original ClaimCheck result. The remaining gap appears to come from model scale, search and evidence quality, architecture mismatch, and the difficulty of the AVeriTeC label space.
+
+\section*{Proposed Idea / Exploration}
+ClaimCheck's central idea is to avoid direct one-shot fact-checking. Instead, the system follows a structured workflow that resembles human fact-checking: decompose the claim, search for evidence, summarize useful sources, synthesize the evidence, and then predict a final verdict. This explicit reasoning structure is intended to reduce the burden on the model at each step.
+
+Figure~\ref{fig:paper-demo-full} shows the original paper's demo interface. It is useful for understanding what the system is supposed to produce: a visible progress trace, a list of retrieved evidence articles, synthesized reasoning, and a final verdict. Our local reproduction produces the same kind of artifacts as files under \texttt{ClaimCheck/reports/}, although the interface itself was not the focus of the experiment.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.93\linewidth,height=0.58\textheight,keepaspectratio]{../arXiv-2510.01226v1/latex/figures/demo-full.png}
+    \caption{Original ClaimCheck Figure 1: an example full demo output. This illustrates the user-facing goal of the system: retrieved evidence, synthesized analysis, and final verdict are exposed as an auditable report.}
+    \label{fig:paper-demo-full}
+\end{figure*}
+
+Figure~\ref{fig:claimcheck-framework} gives the high-level architecture. This is the conceptual template we reproduced locally. The most important point for our topic is that the model is not only a classifier. It is repeatedly used as a planner, summarizer, synthesizer, and evaluator.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.86\linewidth,height=0.45\textheight,keepaspectratio]{../arXiv-2510.01226v1/latex/figures/ClaimCheck.pdf}
+    \caption{Original ClaimCheck Figure 2: overview of the LLM-guided fact-checking pipeline. The dashed feedback path indicates that the system can request more evidence before issuing a verdict.}
+    \label{fig:claimcheck-framework}
+\end{figure}
+
+Figure~\ref{fig:paper-demo-search} shows the Web evidence stage from the original paper. This part is especially important in our reproduction because the final verdict quality depends heavily on whether the retrieved articles are relevant and whether their summaries preserve the right information.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.76\linewidth,height=0.45\textheight,keepaspectratio]{../arXiv-2510.01226v1/latex/figures/demo-search-3.png}
+    \caption{Original ClaimCheck Figure 3: summarized Web evidence collected for a claim. Our reproduction uses the same broad idea, but with Bocha Web search and local report files rather than the original search stack.}
+    \label{fig:paper-demo-search}
+\end{figure}
+
+Our local system follows the ClaimCheck idea but not the exact implementation. It runs a simplified modular loop: claim matching is attempted, questions and Web queries are generated, Bocha search retrieves candidate pages, evidence is summarized, one synthesis step decides whether more information is needed, and a fine-tuned 4B model predicts the final AVeriTeC verdict.
+
+\section*{Technical Details}
+\subsection*{Original Method}
+The original paper evaluates ClaimCheck on the AVeriTeC development set because the test labels are unavailable. It reports that the development set contains 500 claims with four verdict classes: \textit{Supported}, \textit{Refuted}, \textit{Conflicting Evidence/Cherrypicking}, and \textit{Not Enough Evidence}. The paper's reported headline accuracy is 0.626 for the full system and 0.598 for the version without claim matching.
+
+In the paper, the system uses Web search with temporal filtering so that evidence retrieved for a claim should have been available at the time the claim was made. The paper also emphasizes modular prompting and explicit reasoning, using an LLM across planning, evidence processing, and evaluation.
+
+\subsection*{Local Reproduction}
+The local reproduction uses the following setup:
+
+\begin{itemize}
+\item \textbf{Dataset:} \texttt{data/dev.json}, an AVeriTeC-style 500-claim development sample.
+\item \textbf{Base model:} \texttt{Qwen/Qwen3.5-4B}.
+\item \textbf{Fine-tuned adapter:} \texttt{outputs/qwen35-averitec-lora/}, checkpoint 192.
+\item \textbf{Inference:} local HuggingFace Transformers on \texttt{cuda:1}.
+\item \textbf{Search backend:} Bocha Web Search API.
+\item \textbf{Execution wrapper:} \texttt{./run.sh 500} inside tmux session \texttt{claimcheck-full-500}.
+\item \textbf{Result state file:} \texttt{temp/run\_state\_fcdf895a8e9e.json}.
+\item \textbf{Extracted summary:} \path{report/claimcheck_full_500_summary.md}.
+\item \textbf{Extracted predictions:} \path{report/claimcheck_full_500_predictions.csv}.
+\item \textbf{Extracted JSON:} \path{report/claimcheck_full_500_extracted.json}.
+\item \textbf{Fine-tuning status:} the 500-claim run is treated as fine-tuned. The wrapper sources the environment file, disables paper-alignment mode, and points the local adapter variable to the LoRA directory under \texttt{outputs/}. The run state file records predictions but does not itself store model metadata.
+\end{itemize}
+
+Several engineering changes were needed to make the experiment runnable: local model loading, LoRA adapter loading, GPU placement, Bocha integration, Web-search quota tracking, report-state persistence, and tmux execution. These changes make the system practical locally, but they also mean the experiment is not a bit-for-bit reproduction of the original paper.
+
+\subsection*{Fine-Tuning}
+The fine-tuned local model uses a LoRA adapter trained for AVeriTeC-style verdict prediction. The adapter is stored at \texttt{outputs/qwen35-averitec-lora/}, with checkpoint 192 as the latest checkpoint. The training target is to make the 4B model produce normalized verdict labels and justifications more reliably than the base model.
+
+This fine-tuning is not the same as the original paper's fine-tuned Qwen2.5-7B verdict model. It uses a smaller model family and a local training setup. Therefore, the experiment is best interpreted as a local test of whether a fine-tuned 4B model can support the ClaimCheck-style reasoning pipeline, not as a direct replacement for the paper's 7B model.
+
+\section*{Results}
+\subsection*{Full 500-Claim Run}
+The completed tmux experiment processed all 500 records. The run took 05:56:58, issued 2904 Bocha search queries, and used an average of 5.808 search queries per claim. It produced 500 report directories under \texttt{ClaimCheck/reports/}. Of the 500 records, 498 completed successfully and 2 failed before producing a valid verdict.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lr}
+\hline
+Metric & Value \\
+\hline
+Total records & 500 \\
+Completed records & 498 \\
+Failed records & 2 \\
+Correct predictions & 214 \\
+Full-run accuracy & 0.428 \\
+Valid verdicts & 498 \\
+Valid-only accuracy & 0.430 \\
+Total Bocha queries & 2904 \\
+Average queries per claim & 5.808 \\
+Average evidence items per claim & 3.662 \\
+Average QA pairs per claim & 3.098 \\
+Runtime & 05:56:58 \\
+\hline
+\end{tabular}
+\caption{Main results from the full 500-claim local ClaimCheck run with the fine-tuned Qwen3.5-4B LoRA model.}
+\label{tab:main-results}
+\end{table}
+
+The gold label distribution and predicted label distribution are shown in Table~\ref{tab:label-distribution}. The model predicts \textit{Conflicting Evidence/Cherrypicking} only twice, even though that class appears 38 times in the gold labels. This class imbalance is one of the clearest weaknesses of the final model.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lrr}
+\hline
+Label & Gold Count & Predicted Count \\
+\hline
+Refuted & 305 & 203 \\
+Supported & 122 & 159 \\
+Not Enough Evidence & 35 & 134 \\
+Conflicting Evidence/Cherrypicking & 38 & 2 \\
+No verdict / failed & 0 & 2 \\
+\hline
+\end{tabular}
+\caption{Gold and predicted verdict distributions for the 500-claim run.}
+\label{tab:label-distribution}
+\end{table}
+
+The most common correct case is \textit{Refuted} predicted as \textit{Refuted}, with 144 examples. The largest error modes are \textit{Refuted} claims predicted as \textit{Not Enough Evidence} 87 times and \textit{Refuted} claims predicted as \textit{Supported} 72 times. This means that the fine-tuned model is better at producing legal verdict labels than the early run, but it still struggles to calibrate the verdict under noisy evidence.
+
+\subsection*{Fine-Tuned Run and Available Baselines}
+The main completed experiment in this workspace is the fine-tuned Qwen3.5-4B LoRA run over 500 claims. The result source is \texttt{temp/run\_state\_fcdf895a8e9e.json}, extracted into the summary and prediction files in \texttt{report/}. This run produced 498 valid verdicts and achieved \(214/500 = 0.428\) accuracy.
+
+The workspace also contains an earlier 10-record debugging run in the experiment notes. That run should not be treated as a non-fine-tuned baseline: the note says the LoRA adapter was loaded. It is useful only as an early fine-tuned-but-unstable pipeline result, where seven of ten outputs were malformed ``Thinking Process'' responses and accuracy was \(1/10 = 0.100\).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{p{0.56\linewidth}rrr}
+\hline
+Setting & Records & Correct & Accuracy \\
+\hline
+Early fine-tuned LoRA debugging run & 10 & 1 & 0.100 \\
+Fine-tuned Qwen3.5-4B LoRA full run & 500 & 214 & 0.428 \\
+Original ClaimCheck paper & 500 & -- & 0.626 \\
+\hline
+\end{tabular}
+\caption{Available result sources. The two local rows are both LoRA-based runs, so this table should be read as an engineering progress comparison rather than a fine-tuned versus non-fine-tuned ablation.}
+\label{tab:fine-tune-comparison}
+\end{table}
+
+This comparison supports a limited claim: the final fine-tuned pipeline is much more usable than the early debugging run. The improvement from 10.0\% to 42.8\% is large, and malformed verdicts dropped from most outputs in the early run to only two failures in the full run. However, because both local rows used the LoRA adapter, this is not evidence by itself that fine-tuning caused the whole improvement. A clean non-fine-tuned baseline would require rerunning the same pipeline with \texttt{LOCAL\_LLM\_ADAPTER} unset.
+
+\section*{Analysis and Discussion}
+The main research question was whether a fine-tuned 4B-parameter LLM can perform reliable fact verification through explicit reasoning. The result is: it can perform the task, but not reliably enough to match the paper's reported effectiveness.
+
+The positive finding is that the explicit reasoning pipeline is operational. The local system can process all 500 claims, retrieve Web evidence, produce per-claim reports, and generate normalized verdicts for almost every example. The available logs indicate that this completed run used the fine-tuned LoRA adapter, but the workspace does not yet contain a controlled non-fine-tuned 500-claim comparison.
+
+The negative finding is that normalized output is not the same as reliable verification. The final accuracy is 0.428, which is much better than the early run but still below the original paper's 0.626 and not strong enough for dependable fact-checking. The model often defaults to \textit{Not Enough Evidence} or \textit{Supported} when the gold label is \textit{Refuted}, and it almost never predicts \textit{Conflicting Evidence/Cherrypicking}. This suggests that the hardest part is not merely producing a label, but correctly reasoning over ambiguous or mixed evidence.
+
+Several factors likely explain the gap:
+
+\begin{enumerate}
+\item \textbf{Model scale and model family differ from the paper.} The original result uses a 7B-class setup, while this reproduction uses Qwen3.5-4B.
+\item \textbf{The local LoRA adapter is not the paper's verdict model.} It improves local behavior, but it is not the same checkpoint, training recipe, or model architecture used in ClaimCheck.
+\item \textbf{The active local scaffold is simpler than the paper architecture.} Claim matching is attempted but never matched in this run, and the novel-claim branch is a simplified version of the full described method.
+\item \textbf{Retrieval quality remains noisy.} The system issued 2904 Web queries and retrieved useful evidence for many claims, but irrelevant or weak evidence still appears in reports.
+\item \textbf{The label space is hard.} \textit{Conflicting Evidence/Cherrypicking} is especially difficult because it requires recognizing partial support and selective framing rather than simple entailment or contradiction.
+\end{enumerate}
+
+Therefore, the reproduction supports a practical but cautious conclusion. A fine-tuned 4B model can run an explicit-reasoning fact-verification pipeline over all 500 claims. It is not yet reliable enough to reproduce ClaimCheck's published accuracy or to serve as an independent high-confidence fact checker, and the separate effect of fine-tuning still needs a same-pipeline non-adapter baseline.
+
+\section*{References}
+\begin{thebibliography}{9}
+
+\bibitem{claimcheck2025}
+Akshith Reddy Putta, Jacob Devasier, and Chengkai Li.
+\newblock ClaimCheck: Automatic Fact-Checking of Textual Claims using Web Evidence.
+\newblock In \textit{Proceedings of the 4th International Workshop on Knowledge-Augmented Methods for Natural Language Processing (KnowledgeNLP'25)}, 2025.
+
+\bibitem{averitec2023}
+Andreas Vlachos et al.
+\newblock AVeriTeC: A dataset for real-world claim verification with evidence from the web.
+\newblock 2023.
+
+\bibitem{fever2024}
+Andreas Vlachos et al.
+\newblock The Automated Verification of Textual Claims (AVeriTeC) Shared Task.
+\newblock In \textit{Proceedings of the Seventh Fact Extraction and VERification Workshop (FEVER)}, 2024.
+
+\bibitem{hero2024}
+Yejun Yoon, Jaeyoon Jung, Seunghyun Yoon, and Kunwoo Park.
+\newblock HerO at AVeriTeC: The herd of evidence-driven retrievers with large language models for claim verification.
+\newblock 2024.
+
+\bibitem{infact2024}
+Alexander Rothermel et al.
+\newblock InFact.
+\newblock 2024.
+
+\end{thebibliography}
+
+\end{document}
