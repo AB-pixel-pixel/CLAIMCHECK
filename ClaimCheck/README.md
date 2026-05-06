@@ -1,53 +1,50 @@
-# ClaimCheck
+# ClaimCheck Submodule
 
-## 概述
+This directory contains the local fact-checking scaffold used by the reproduction project in the repository root.
 
-ClaimCheck 是一个事实核查系统，它会处理声明，并使用各种模块和模型来验证这些声明的真实性。
+For the full project overview, environment setup, dependency installation, experiment commands, and reproduction notes, read the root-level [README.md](/home/airs/homework/llm_fp/README.md).
 
-## 前置条件
+## What Is In This Directory
 
-1. 在 Google 中创建一个新的 Programmable Search Engine：
+- `run_dev.py`: main entrypoint used by the local pipeline
+- `factchecker/`: fact-checking modules, report writer, and search/scraping tools
+- `demo/`: lightweight demo server assets
+- `requirement.txt`: original submodule dependency list retained for reference
 
-   * 前往 [Programmable Search Engine](https://cse.google.com/cse/) 并创建一个新的搜索引擎。
-   * 记下 CSE ID。
-   * 在 [Google Cloud Console](https://console.cloud.google.com/) 中启用 Custom Search JSON API。
-   * 记下 API key。
+## How This Submodule Is Used
 
-2. 从 [SerpAPI](https://serper.dev/) 获取你的 API key。
-
-## 安装
-
-1. 克隆仓库：
-
-   ```bash
-   git clone https://github.com/idirlab/ClaimCheck.git
-   cd ClaimCheck
-   ```
-
-2. 安装所需依赖：
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. 在代码中更新 API key：
-
-   * 打开 `claim_matching.py`，并更新 Google Cloud API key 和 CSE ID。
-   * 打开 `search.py`，并更新 SerpAPI key。
-
-## 使用方法
-
-要从命令行运行事实核查系统，请使用 `fact-check.py` 脚本。它接收两个参数：包含声明的 JSON 文件路径，以及要处理的记录数量。
-
-### 命令行参数：
-
-* `json_path`：AVeriTeC JSON 文件的路径。
-* `num_records`：要运行的声明数量。
-
-### 示例：
+From the repository root, the main short-run command is:
 
 ```bash
-python fact-check.py /path/to/json/file.json 5
+./run.sh 5
 ```
 
-将 `/path/to/json/file.json` 替换为你的 AVeriTeC JSON 文件的实际路径，并将 `5` 替换为你想要处理的记录数量。你可以在[这里](https://fever.ai/dataset/averitec.html)找到 AVeriTeC JSON 文件。
+This eventually calls:
+
+```bash
+/home/airs/miniforge3/envs/validation/bin/python ClaimCheck/run_dev.py data/dev.json 5
+```
+
+If you want to run the submodule entrypoint directly:
+
+```bash
+python ClaimCheck/run_dev.py data/dev.json 5
+```
+
+## Environment Notes
+
+This reproduction uses:
+
+- a local Hugging Face model for generation
+- `BOCHA_API_KEY` for web search
+- `.env` values loaded from the repository root
+- `LD_LIBRARY_PATH` configured for the `validation` conda environment
+
+In practice, you should use the root-level helper scripts instead of manually editing source files for API keys or model names.
+
+## Important Differences From The Original Upstream ClaimCheck
+
+- This is a locally adapted reproduction scaffold, not a clean mirror of the original upstream repository.
+- Search configuration is environment-variable based.
+- Local model loading and optional LoRA adapter support are handled in `factchecker/modules/llm.py`.
+- Public repository history intentionally excludes model weights, local secrets, and generated reports.
