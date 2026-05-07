@@ -98,7 +98,7 @@ Variable meanings:
 - `SERPER_SOFT_LIMIT`: early-stop budget to avoid overrunning quota
 - `CLAIMCHECK_PAPER_ALIGN`: when set to `1`, prefer the paper-aligned local model path in code
 - `PAPER_LLM_MODEL`: fallback model name used for paper-aligned mode
-- `LOCAL_LLM_ADAPTER`: optional LoRA adapter path for verdict-model experiments
+- `LOCAL_LLM_ADAPTER`: optional LoRA adapter path used only in the final verdict stage
 - `LOCAL_MAX_NEW_TOKENS`: optional generation length override
 - `CLAIMCHECK_FORCE_THINK`: force enable or disable thinking mode if the tokenizer supports it
 
@@ -139,6 +139,9 @@ Prepare SFT training data:
 python scripts/prepare_averitec_sft.py
 ```
 
+The current default output is `data/averitec/train_sft_verdict.jsonl`. By default, the script excludes
+the gold justification from the input evidence to avoid leakage.
+
 Train the LoRA adapter:
 
 ```bash
@@ -164,7 +167,7 @@ Useful fine-tuning overrides:
 
 ```bash
 FT_MODEL_NAME=Qwen/Qwen3.5-4B \
-FT_DATA_PATH=/abs/path/to/train_sft.jsonl \
+FT_DATA_PATH=/abs/path/to/train_sft_verdict.jsonl \
 FT_OUTPUT_DIR=/abs/path/to/output_dir \
 FT_MAX_LENGTH=1024 \
 python scripts/train_qwen35_averitec_lora.py

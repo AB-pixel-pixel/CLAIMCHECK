@@ -2,6 +2,7 @@ import openai
 import os
 # import ollama # Removed as per user request
 import torch
+from contextlib import nullcontext
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 import base64
@@ -17,6 +18,21 @@ PAPER_MODEL = os.getenv("PAPER_LLM_MODEL", "Qwen/Qwen3-4B")
 DEFAULT_LOCAL_MODEL = os.getenv("LOCAL_LLM_MODEL", "Qwen/Qwen3.5-4B")
 DEFAULT_LOCAL_ADAPTER = os.getenv("LOCAL_LLM_ADAPTER", None)
 DEFAULT_CUDA_DEVICE = os.getenv("LOCAL_CUDA_DEVICE", "1")
+
+
+def _compact_prompt_text(prompt: str) -> str:
+    max_chars = int(os.getenv("LOCAL_MAX_PROMPT_CHARS", "16000"))
+    head_chars = int(os.getenv("LOCAL_PROMPT_HEAD_CHARS", "4000"))
+    if not isinstance(prompt, str) or len(prompt) <= max_chars:
+        return prompt
+    tail_chars = max(max_chars - head_chars - 32, 0)
+    if tail_chars <= 0:
+        return prompt[:max_chars]
+    return (
+        prompt[:head_chars].rstrip()
+        + "\n\n... [prompt truncated] ...\n\n"
+        + prompt[-tail_chars:].lstrip()
+    )
 
 
 def _resolve_local_snapshot_path(model_name: str) -> str:
@@ -119,6 +135,7 @@ def prompt_local(
     prompt,
     model=None,
     think=True,
+    use_adapter=False,
     max_new_tokens=None,
     temperature=None,
     do_sample=None,
@@ -140,6 +157,7 @@ def prompt_local(
 
     model = model or DEFAULT_LOCAL_MODEL
     model_instance, tokenizer, model_device = get_model_and_tokenizer(model)
+    prompt = _compact_prompt_text(prompt)
     prompt_chars = len(prompt) if isinstance(prompt, str) else 0
     print(f"[LLM] prompt_local start | model={model} | think={think} | prompt_chars={prompt_chars}", flush=True)
     
@@ -161,7 +179,16 @@ def prompt_local(
             add_generation_prompt=True,
         )
     
-    model_inputs = tokenizer([text], return_tensors="pt").to(model_device)
+    max_input_tokens = int(os.getenv("LOCAL_MAX_INPUT_TOKENS", "4096"))
+    original_truncation_side = getattr(tokenizer, "truncation_side", "right")
+    tokenizer.truncation_side = "left"
+    model_inputs = tokenizer(
+        [text],
+        return_tensors="pt",
+        truncation=True,
+        max_length=max_input_tokens,
+    ).to(model_device)
+    tokenizer.truncation_side = original_truncation_side
     
     # Generate response
     # You might want to adjust max_new_tokens or other parameters
@@ -176,13 +203,19 @@ def prompt_local(
     if top_p is None:
         top_p = 0.95
 
-    generated_ids = model_instance.generate(
-        **model_inputs,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        do_sample=do_sample,
-        top_p=top_p,
-    )
+    generation_context = nullcontext()
+    if isinstance(model_instance, PeftModel) and not use_adapter:
+        generation_context = model_instance.disable_adapter()
+
+    with torch.inference_mode():
+        with generation_context:
+            generated_ids = model_instance.generate(
+                **model_inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+                top_p=top_p,
+            )
     t1 = perf_counter()
     print(f"[LLM] generation done | elapsed_sec={t1 - t0:.2f}", flush=True)
     
@@ -195,6 +228,11 @@ def prompt_local(
     # Strip <think> blocks when the template returns reasoning traces.
     if "</think>" in response:
         response = response.split("</think>", 1)[-1].strip()
-        
+
+    del generated_ids
+    del model_inputs
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     print(f"[LLM] prompt_local end | response_chars={len(response)}", flush=True)
     return response

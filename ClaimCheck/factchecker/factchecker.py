@@ -85,16 +85,34 @@ class FactChecker:
         except Exception as e:
             print(f"Error saving report JSON: {e}")
 
+    def _compact_text(self, text, max_chars=None, head_chars=None):
+        text = text or ""
+        max_chars = max_chars or int(os.getenv("CLAIMCHECK_MAX_REPORT_CHARS", "18000"))
+        head_chars = head_chars or int(os.getenv("CLAIMCHECK_REPORT_HEAD_CHARS", "4000"))
+        if len(text) <= max_chars:
+            return text
+        tail_chars = max(max_chars - head_chars - 32, 0)
+        if tail_chars <= 0:
+            return text[:max_chars]
+        return (
+            text[:head_chars].rstrip()
+            + "\n\n... [report truncated] ...\n\n"
+            + text[-tail_chars:].lstrip()
+        )
+
     def get_report(self):
         report_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../reports', self.identifier, 'report.md'))
         try:
             with open(report_path, "r") as f:
-                return f.read()
+                return self._compact_text(f.read())
         except Exception as e:
             return f"Error reading report: {e}"
 
     def add_relevant_evidence(self, url, text):
+        max_chars = int(os.getenv("CLAIMCHECK_MAX_EVIDENCE_CHARS", "900"))
         text = (text or "").strip()
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip() + "..."
         url = (url or "").strip() or "unknown-url"
         if not text:
             return False
@@ -104,6 +122,9 @@ class FactChecker:
             return False
 
         self.report["relevant_evidence"].append(candidate)
+        max_items = int(os.getenv("CLAIMCHECK_MAX_EVIDENCE_ITEMS", "12"))
+        if len(self.report["relevant_evidence"]) > max_items:
+            self.report["relevant_evidence"] = self.report["relevant_evidence"][-max_items:]
         return True
 
     def build_verdict_record(self, max_items=8, max_summary_chars=700):
@@ -282,6 +303,12 @@ class FactChecker:
                 return verdict, ""
         return "", ""
 
+    def latest_reasoning_text(self):
+        reasoning = self.report.get("reasoning") or []
+        if not reasoning:
+            return ""
+        return (reasoning[-1] or "").strip()
+
     def process_action_line(self, line):
         try:
             m = re.match(r'(\w+)_search\("([^"]+)"\)', line)
@@ -300,6 +327,7 @@ class FactChecker:
                 if action == 'web':
                     self.report["actions"][identifier] = action_entry
                     urls, snippets = web_search.web_search(query, self.date, top_k=5)
+                    snippet_map = {url: snippet for url, snippet in zip(urls, snippets)}
 
                     # Default with snippets from web_search
                     self.report["actions"][identifier]["results"] = {url: {"snippet": snippet, 'url':url, 'summary': None} for url, snippet in zip(urls, snippets)}
@@ -310,8 +338,21 @@ class FactChecker:
                         summary = evidence_summarization.summarize(self.claim, scraped_content, result, record=self.get_report())
 
                         if "NONE" in summary:
-                            print(f"Skipping summary for evidence: {result}")
-                            return None
+                            snippet = (snippet_map.get(result) or "").strip()
+                            if snippet:
+                                snippet_summary = evidence_summarization.summarize(
+                                    self.claim,
+                                    snippet,
+                                    result,
+                                    record=self.get_report(),
+                                )
+                                if "NONE" not in snippet_summary:
+                                    summary = snippet_summary
+                                else:
+                                    summary = snippet[:500]
+                            else:
+                                print(f"Skipping summary for evidence: {result}")
+                                return None
 
                         print(f"Web search result: {result}, Summary: {summary}")
                         report_writer.append_raw(f"web_search('{query}') results: {result}")
@@ -354,10 +395,16 @@ class FactChecker:
 
             useful = evidence_curation.is_useful(self.claim, f"Question: {question}\nAnswer: {answer_clean}")
             self.report["actions"][identifier]["results"][url]["useful"] = useful
+            if not useful:
+                self.save_report_json()
+                continue
 
             qa_item = {"question": question, "answer": answer_clean, "url": url}
             if qa_item not in self.report["qa_pairs"]:
                 self.report["qa_pairs"].append(qa_item)
+                max_items = int(os.getenv("CLAIMCHECK_MAX_QA_ITEMS", "12"))
+                if len(self.report["qa_pairs"]) > max_items:
+                    self.report["qa_pairs"] = self.report["qa_pairs"][-max_items:]
             self.add_relevant_evidence(url, answer_clean)
             report_writer.append_evidence(f"Q: {question}\nA: {answer_clean}\nURL: {url}")
             self.save_report_json()
@@ -390,16 +437,28 @@ class FactChecker:
             f"[PIPELINE] verdict_record_sizes evidence={len(verdict_record['relevant_evidence'])} qa={len(verdict_record['qa_text'])}",
             flush=True,
         )
+        latest_reasoning = self.latest_reasoning_text()
+        should_judge = True
         if (
             not force_judge
             and not verdict_record["relevant_evidence"].strip()
             and not verdict_record["qa_text"].strip()
         ):
-            pred_verdict = "Not Enough Evidence"
-            pred_justification = "No relevant evidence or question-answer pairs were collected."
-            verdict = pred_justification
-            print("[PIPELINE] No evidence collected; using Not Enough Evidence.", flush=True)
-        else:
+            if latest_reasoning:
+                print("[PIPELINE] No evidence collected; retrying verdict with synthesized reasoning.", flush=True)
+                enriched_record = {
+                    "claim": verdict_record["claim"],
+                    "relevant_evidence": latest_reasoning,
+                    "qa_text": "",
+                }
+                verdict_record = enriched_record
+            else:
+                pred_verdict = "Not Enough Evidence"
+                pred_justification = "No relevant evidence or question-answer pairs were collected."
+                verdict = pred_justification
+                should_judge = False
+                print("[PIPELINE] No evidence collected; using Not Enough Evidence.", flush=True)
+        if should_judge:
             while judge_tries < max_judge_tries:
                 verdict = evaluation.judge(
                     record=verdict_record,

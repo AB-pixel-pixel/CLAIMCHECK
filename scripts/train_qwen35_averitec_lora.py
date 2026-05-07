@@ -14,7 +14,7 @@ from transformers import (
 
 
 MODEL_NAME = os.getenv("FT_MODEL_NAME", "Qwen/Qwen3.5-4B")
-DATA_PATH = os.getenv("FT_DATA_PATH", "/home/airs/homework/llm_fp/data/averitec/train_sft.jsonl")
+DATA_PATH = os.getenv("FT_DATA_PATH", "/home/airs/homework/llm_fp/data/averitec/train_sft_verdict.jsonl")
 OUTPUT_DIR = os.getenv("FT_OUTPUT_DIR", "/home/airs/homework/llm_fp/outputs/qwen35-averitec-lora")
 MAX_LENGTH = int(os.getenv("FT_MAX_LENGTH", "1024"))
 
@@ -59,18 +59,37 @@ def preprocess(tokenizer):
     dataset = load_dataset("json", data_files=DATA_PATH, split="train")
 
     def _tok(example):
-        text = tokenizer.apply_chat_template(
+        prompt_text = tokenizer.apply_chat_template(
+            example["messages"][:-1],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        full_text = tokenizer.apply_chat_template(
             example["messages"],
             tokenize=False,
             add_generation_prompt=False,
         )
         tokenized = tokenizer(
-            text,
+            full_text,
             truncation=True,
             max_length=MAX_LENGTH,
             padding="max_length",
         )
-        tokenized["labels"] = tokenized["input_ids"][:]
+        prompt_ids = tokenizer(
+            prompt_text,
+            truncation=True,
+            max_length=MAX_LENGTH,
+            padding=False,
+        )["input_ids"]
+
+        labels = tokenized["input_ids"][:]
+        prompt_len = min(len(prompt_ids), len(labels))
+        labels[:prompt_len] = [-100] * prompt_len
+        labels = [
+            token if token != tokenizer.pad_token_id else -100
+            for token in labels
+        ]
+        tokenized["labels"] = labels
         return tokenized
 
     dataset = dataset.map(_tok, remove_columns=dataset.column_names)

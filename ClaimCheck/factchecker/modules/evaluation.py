@@ -3,9 +3,19 @@ from modules.llm import prompt_local
 
 judge_prompt = """
 Instructions
-Determine the Claim's veracity by following these steps:
-1. Briefly summarize the key insights from the fact-check (see Record) in at most one paragraph.
-2. Write one paragraph about which one of the Decision Options applies best. Include the most appropriate decision option at the end and enclose it in backticks like `this`.
+Determine the Claim's veracity from the fact-check record.
+Return ONLY valid JSON with exactly these keys:
+- "verdict"
+- "justification"
+
+Requirements:
+- "verdict" must be exactly one of the Decision Options.
+- "justification" must be a short evidence-grounded explanation.
+- Do not output markdown, code fences, or any text outside the JSON object.
+- Before choosing "Supported", verify that the claim's material details are actually covered by the evidence.
+- If the evidence supports only a weaker or partial version of the claim, do NOT choose "Supported".
+- If a key number, causal link, location, timeframe, or quoted wording is missing, contradicted, or only weakly implied, prefer "Refuted" or "Not Enough Evidence" instead of "Supported".
+- If the record itself says the claim is exaggerated, misleading, false, fabricated, or not supported, do NOT choose "Supported".
 
 Decision Options:
 Supported|Refuted|Conflicting Evidence/Cherrypicking|Not Enough Evidence
@@ -50,6 +60,7 @@ def judge(record, decision_options, rules="", think=True):
     return prompt_local(
         prompt,
         think=False,
+        use_adapter=True,
         max_new_tokens=256,
         do_sample=False,
     )
@@ -60,6 +71,7 @@ def extract_verdict(conclusion, decision_options, rules=""):
     return prompt_local(
         prompt,
         think=False,
+        use_adapter=True,
         max_new_tokens=64,
         do_sample=False,
     )
